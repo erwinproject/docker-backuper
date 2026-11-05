@@ -314,6 +314,10 @@ class DockerClient:
             res = subprocess.run(cmd, cwd=str(compose_path.parent), capture_output=True, text=True, check=True)
             logger.info("Compose started successfully:\n%s", res.stdout)
             return True
+        except subprocess.CalledProcessError as e:
+            err_msg = (e.stderr or e.stdout or str(e)).strip()
+            logger.error("Failed to execute docker compose up:\n%s", err_msg)
+            return False
         except Exception as e:
             logger.error("Failed to execute docker compose up: %s", e)
             return False
