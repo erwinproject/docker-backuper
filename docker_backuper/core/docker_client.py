@@ -321,3 +321,29 @@ class DockerClient:
         except Exception as e:
             logger.error("Failed to execute docker compose up: %s", e)
             return False
+
+    def save_image(self, image_name: str, output_tar: Path) -> bool:
+        """Saves a Docker image to a tar archive using 'docker save'."""
+        output_tar.parent.mkdir(parents=True, exist_ok=True)
+        logger.info("Saving Docker image '%s' to %s ...", image_name, output_tar.name)
+        cmd = ["docker", "save", "-o", str(output_tar), image_name]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            return res.returncode == 0
+        except Exception as e:
+            logger.error("Failed to save Docker image '%s': %s", image_name, e)
+            if output_tar.exists():
+                output_tar.unlink()
+            return False
+
+    def load_image(self, input_tar: Path) -> bool:
+        """Loads a Docker image from a tar archive using 'docker load'."""
+        logger.info("Loading Docker image from %s ...", input_tar.name)
+        cmd = ["docker", "load", "-i", str(input_tar)]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            logger.info("Docker load output: %s", res.stdout.strip())
+            return res.returncode == 0
+        except Exception as e:
+            logger.error("Failed to load Docker image from %s: %s", input_tar, e)
+            return False

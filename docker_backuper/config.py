@@ -23,6 +23,8 @@ class RetentionConfig:
 class DefaultsConfig:
     pause_container: bool = True
     backup_compose_files: bool = True
+    backup_images: bool = True
+    standalone_compose: bool = True
 
 
 @dataclass
@@ -117,6 +119,8 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
     defaults = DefaultsConfig(
         pause_container=bool(d_data.get("pause_container", True)),
         backup_compose_files=bool(d_data.get("backup_compose_files", True)),
+        backup_images=bool(d_data.get("backup_images", True)),
+        standalone_compose=bool(d_data.get("standalone_compose", True)),
     )
 
     # Targets

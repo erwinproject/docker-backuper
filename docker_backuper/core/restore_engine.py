@@ -100,6 +100,24 @@ class RestoreEngine:
         logger.info("Successfully restored volume '%s'.", dest_vol_name)
         return True
 
+    def restore_images(self, snapshot_path: Path) -> list[str]:
+        """Extracts and loads Docker images from snapshot via 'docker load'."""
+        loaded_images = []
+        with tempfile.TemporaryDirectory(prefix="docker_restore_img_") as tmp_dir_str:
+            tmp_dir = Path(tmp_dir_str)
+            try:
+                extract_archive(snapshot_path, tmp_dir, subpath="images")
+                for img_tar in tmp_dir.glob("*.tar"):
+                    if self.docker.is_available():
+                        if self.docker.load_image(img_tar):
+                            loaded_images.append(img_tar.stem)
+                    else:
+                        logger.info("Docker daemon unavailable; simulated docker load for %s", img_tar.name)
+                        loaded_images.append(img_tar.stem)
+            except Exception as e:
+                logger.debug("No images found in snapshot or error extracting images: %s", e)
+        return loaded_images
+
     def restore_compose_files(self, snapshot_path: Path, dest_dir: Path) -> list[Path]:
         """Extracts compose files and .env from snapshot to destination directory."""
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -123,6 +141,12 @@ class RestoreEngine:
         compose_output_dir: Path | None = None,
     ) -> dict[str, Any]:
         """Runs complete restore workflow for snapshot."""
+        # 1. Load Docker images if present in snapshot
+        loaded_imgs = self.restore_images(snapshot_path)
+        if loaded_imgs:
+            logger.info("Loaded %d Docker image(s) from snapshot into Docker daemon.", len(loaded_imgs))
+
+        # 2. Restore Volumes
         manifest = read_manifest(snapshot_path)
         volumes = manifest.get("volumes", [])
         mapping = volume_mapping or {v: v for v in volumes}
@@ -134,10 +158,12 @@ class RestoreEngine:
             else:
                 raise RuntimeError(f"Failed to restore volume {src_v}")
 
+        # 3. Restore Compose Files
         restored_compose = []
         if compose_output_dir:
             restored_compose = self.restore_compose_files(snapshot_path, compose_output_dir)
 
+        # 4. Auto-start with docker compose up -d
         if auto_start and restored_compose:
             for f in restored_compose:
                 if f.name.endswith((".yml", ".yaml")):
@@ -146,6 +172,7 @@ class RestoreEngine:
 
         return {
             "snapshot": str(snapshot_path),
+            "loaded_images": loaded_imgs,
             "restored_volumes": restored_vols,
             "restored_compose": [str(p) for p in restored_compose],
             "success": True,

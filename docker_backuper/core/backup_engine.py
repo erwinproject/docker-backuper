@@ -151,6 +151,77 @@ class BackupEngine:
 
         return targets
 
+    def generate_standalone_compose(self, container_info: dict[str, Any], volume_names: list[str]) -> str:
+        """
+        Generates a standalone, zero-dependency docker-compose.yml directly from container inspection.
+        Replaces local build context and external env_files with direct image and embedded environment variables,
+        enabling portable migration without needing original project files.
+        """
+        raw = container_info.get("raw") or {}
+        config = raw.get("Config") or {}
+        host_config = raw.get("HostConfig") or {}
+
+        c_name = container_info.get("name", "app")
+        image = container_info.get("image") or config.get("Image", "")
+
+        # Environment variables
+        env_list = config.get("Env") or []
+        clean_env = [e for e in env_list if not e.startswith("PATH=")]
+
+        # Port bindings
+        port_bindings = host_config.get("PortBindings") or {}
+        ports = []
+        for container_port, host_list in port_bindings.items():
+            if host_list:
+                for entry in host_list:
+                    hp = entry.get("HostPort")
+                    if hp:
+                        cp = container_port.split("/")[0]
+                        ports.append(f"{hp}:{cp}")
+
+        # Volume mappings
+        vol_mappings = []
+        named_vols = set()
+        for m in container_info.get("mounts", []):
+            m_type = m.get("type")
+            m_name = m.get("name")
+            m_dest = m.get("destination")
+            if m_type == "volume" and m_name and m_dest:
+                vol_mappings.append(f"{m_name}:{m_dest}")
+                named_vols.add(m_name)
+
+        restart_policy = host_config.get("RestartPolicy", {}).get("Name") or "unless-stopped"
+        if not restart_policy:
+            restart_policy = "unless-stopped"
+
+        svc: dict[str, Any] = {
+            "container_name": c_name,
+            "image": image,
+            "restart": restart_policy,
+        }
+        if ports:
+            svc["ports"] = sorted(list(set(ports)))
+        if clean_env:
+            svc["environment"] = clean_env
+        if vol_mappings:
+            svc["volumes"] = vol_mappings
+
+        compose_dict: dict[str, Any] = {
+            "version": "3.8",
+            "services": {
+                c_name: svc
+            }
+        }
+        if named_vols:
+            compose_dict["volumes"] = {v: {"external": True} for v in named_vols}
+
+        try:
+            import yaml
+            return yaml.dump(compose_dict, sort_keys=False, default_flow_style=False)
+        except ImportError:
+            import json
+            return json.dumps(compose_dict, indent=2)
+
     def run_backup(
         self,
         target: TargetConfig,
@@ -226,9 +297,35 @@ class BackupEngine:
 
                     source_map[f"volumes/{vol_name}.tar"] = vol_tar
 
-                # 3. Copy compose file if configured and exists
+                # 3. Export Docker Images (for 100% zero-dependency migration)
+                saved_images = []
+                c_info = self.docker.inspect_container(target.name) if self.docker.is_available() else {}
+                img_name = c_info.get("image") or ""
+
+                if getattr(self.config.defaults, "backup_images", True) and img_name:
+                    images_dir = staging_dir / "images"
+                    images_dir.mkdir(parents=True, exist_ok=True)
+                    safe_img_file = img_name.replace("/", "_").replace(":", "_") + ".tar"
+                    img_tar = images_dir / safe_img_file
+
+                    if self.docker.is_available():
+                        if self.docker.save_image(img_name, img_tar):
+                            source_map[f"images/{safe_img_file}"] = img_tar
+                            saved_images.append(img_name)
+                    else:
+                        img_tar.write_bytes(b"mock-image-tar")
+                        source_map[f"images/{safe_img_file}"] = img_tar
+                        saved_images.append(img_name)
+
+                # 4. Generate Standalone docker-compose.yml or copy existing
                 compose_saved_name = None
-                if target.compose_file and self.config.defaults.backup_compose_files:
+                if getattr(self.config.defaults, "standalone_compose", True) and c_info:
+                    standalone_content = self.generate_standalone_compose(c_info, target.volumes)
+                    dest_comp = staging_dir / "docker-compose.yml"
+                    dest_comp.write_text(standalone_content, encoding="utf-8")
+                    source_map["compose/docker-compose.yml"] = dest_comp
+                    compose_saved_name = "docker-compose.yml"
+                elif target.compose_file and self.config.defaults.backup_compose_files:
                     comp_path = Path(target.compose_file).resolve()
                     if comp_path.is_file():
                         compose_saved_name = comp_path.name
@@ -251,7 +348,7 @@ class BackupEngine:
                     except Exception as e:
                         logger.critical("CRITICAL: Failed to unpause container '%s': %s", c_name, e)
 
-            # 4. Construct Manifest Metadata
+            # 5. Construct Manifest Metadata
             manifest = {
                 "version": "1.0",
                 "snapshot_id": f"{target.name}-{timestamp_str}",
@@ -259,7 +356,9 @@ class BackupEngine:
                 "timestamp": timestamp_str,
                 "timestamp_epoch": time.time(),
                 "volumes": target.volumes,
+                "images": saved_images,
                 "compose_file": compose_saved_name,
+                "standalone": True,
                 "tag": tag,
             }
 

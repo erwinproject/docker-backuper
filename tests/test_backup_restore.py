@@ -12,6 +12,8 @@ class MockDockerClient:
         self.paused = []
         self.unpaused = []
         self.volumes_created = []
+        self.saved_images = []
+        self.loaded_images = []
 
     def is_available(self) -> bool:
         return True
@@ -21,13 +23,24 @@ class MockDockerClient:
             {
                 "id": "c12345",
                 "name": "my-database",
+                "image": "postgres:15",
                 "running": True,
                 "paused": False,
                 "labels": {
                     "docker-backuper.enable": "true",
                     "docker-backuper.project": "my-database",
                 },
-                "mounts": [{"type": "volume", "name": "pg_data"}],
+                "mounts": [{"type": "volume", "name": "pg_data", "destination": "/var/lib/postgresql/data"}],
+                "raw": {
+                    "Config": {
+                        "Image": "postgres:15",
+                        "Env": ["POSTGRES_PASSWORD=secret", "POSTGRES_DB=testdb"],
+                    },
+                    "HostConfig": {
+                        "PortBindings": {"5432/tcp": [{"HostPort": "5432"}]},
+                        "RestartPolicy": {"Name": "unless-stopped"},
+                    },
+                },
             }
         ]
 
@@ -50,7 +63,6 @@ class MockDockerClient:
         return True
 
     def export_volume_tar(self, volume_name, output_tar):
-        # Create a mock volume tar
         output_tar.parent.mkdir(parents=True, exist_ok=True)
         import tarfile
         with tarfile.open(output_tar, "w") as tar:
@@ -64,6 +76,16 @@ class MockDockerClient:
     def import_volume_tar(self, volume_name, input_tar):
         self.create_volume(volume_name)
         return input_tar.is_file()
+
+    def save_image(self, image_name, output_tar):
+        self.saved_images.append(image_name)
+        output_tar.parent.mkdir(parents=True, exist_ok=True)
+        output_tar.write_bytes(b"mock-image-data")
+        return True
+
+    def load_image(self, input_tar):
+        self.loaded_images.append(input_tar.stem)
+        return True
 
     def run_compose_up(self, compose_file):
         return True
@@ -114,8 +136,9 @@ class TestBackupRestoreEngine(unittest.TestCase):
         verification = self.restore_engine.verify_snapshot(snap_path)
         self.assertTrue(verification["valid"])
         self.assertEqual(verification["sha256"], res["sha256"])
+        self.assertIn("postgres:15", self.mock_docker.saved_images)
 
-        # 5. Restore Volume
+        # 5. Restore Volume & Images
         restore_res = self.restore_engine.execute_restore(
             snapshot_path=snap_path,
             volume_mapping={"pg_data": "pg_data_restored"},
@@ -123,6 +146,7 @@ class TestBackupRestoreEngine(unittest.TestCase):
         self.assertTrue(restore_res["success"])
         self.assertIn("pg_data_restored", restore_res["restored_volumes"])
         self.assertIn("pg_data_restored", self.mock_docker.volumes_created)
+        self.assertTrue(len(self.mock_docker.loaded_images) > 0)
 
     def test_multi_restore_batch(self):
         # Create 2 separate target backups

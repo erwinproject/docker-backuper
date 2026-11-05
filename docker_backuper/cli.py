@@ -43,6 +43,9 @@ def prompt_select(title: str, options: list[str]) -> int:
 
 def cmd_backup(args: argparse.Namespace, config: AppConfig, config_path: Path | None, logger) -> int:
     """Handles the 'backup' command (both manual and auto)."""
+    if getattr(args, "no_images", False):
+        config.defaults.backup_images = False
+
     docker_client = DockerClient()
     engine = BackupEngine(config, docker_client=docker_client)
 
@@ -424,6 +427,7 @@ def main():
     p_backup.add_argument("--tag", help="Optional custom label or description for this snapshot")
     p_backup.add_argument("--dry-run", action="store_true", help="Simulate backup without writing archives")
     p_backup.add_argument("--no-prune", action="store_true", help="Skip retention pruning after backup")
+    p_backup.add_argument("--no-images", action="store_true", help="Skip backing up Docker images (creates smaller volume-only archive)")
 
     # restore
     p_restore = subparsers.add_parser("restore", help="Restore Docker volume and configuration from snapshot")

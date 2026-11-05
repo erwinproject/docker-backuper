@@ -47,6 +47,7 @@ Docker containers are ephemeral, but their data is not. While stateless containe
 ## Key Features
 
 - **🚀 Dual Mode (Auto & Manual):** Run ad-hoc backups anytime or let the OS scheduler trigger silent auto-backups.
+- **✈️ Zero-Dependency Standalone Migration:** Automatically exports Docker images (`docker save`) and embeds running environment variables into a self-contained `docker-compose.yml`. You can migrate to any fresh server without needing original source code, Git repos, or local project files!
 - **⏸️ Safe Pause & Resume Lifecycle:** Prevents dirty writes by momentarily pausing target containers during volume archiving, wrapped in a strict `try...finally` guarantee that unpauses containers even if an error occurs.
 - **🏷️ Hybrid Target Discovery:** Automatically discovers what to back up via Docker Labels (`docker-backuper.enable=true`), explicit entries in `config.yaml`, or a host-wide `--all` sweep.
 - **🔒 Process Concurrency Guard:** Uses an atomic PID lockfile to ensure scheduled runs never overlap.
