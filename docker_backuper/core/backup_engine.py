@@ -100,6 +100,57 @@ class BackupEngine:
 
         return discovered
 
+    def get_docker_ps_targets(self) -> list[dict[str, Any]]:
+        """
+        Discovers all currently running Docker containers (docker ps) with rich metadata
+        ready for the interactive checklist TUI.
+        """
+        targets = []
+        if not self.docker.is_available():
+            logger.warning("Docker daemon is not available.")
+            return targets
+
+        containers = self.docker.list_containers(all_containers=False)
+        for c in containers:
+            name = c.get("name", "unknown")
+            labels = c.get("labels") or {}
+
+            # Extract volumes
+            vols = [
+                m["name"]
+                for m in c.get("mounts", [])
+                if m.get("type") == "volume" and m.get("name")
+            ]
+
+            # Detect compose file if available from standard Docker Compose labels
+            compose_file = labels.get("docker-backuper.compose")
+            if not compose_file:
+                comp_files = labels.get("com.docker.compose.project.config_files")
+                if comp_files:
+                    compose_file = comp_files.split(",")[0]
+
+            pause_label = labels.get("docker-backuper.pause", "true").lower()
+            should_pause = pause_label in ("true", "1", "yes")
+
+            target_cfg = TargetConfig(
+                name=name,
+                compose_file=compose_file,
+                volumes=vols,
+                pause_during_backup=should_pause,
+            )
+
+            targets.append({
+                "name": name,
+                "id": c.get("id", ""),
+                "image": c.get("image", ""),
+                "status": c.get("status", "running"),
+                "volumes": vols,
+                "compose_file": compose_file,
+                "target_config": target_cfg,
+            })
+
+        return targets
+
     def run_backup(
         self,
         target: TargetConfig,

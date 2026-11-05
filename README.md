@@ -143,22 +143,28 @@ docker-backuper --help
 
 ## Quick Start Guide
 
-### 1. Discover & Backup Interactively (Manual)
-Run the interactive wizard to detect running containers and volumes:
+### 1. Interactive `docker ps` Checklist (Manual Backup)
+Run the interactive checklist to scan running containers directly from `docker ps` and select what to back up:
 ```bash
 docker-backuper backup -i
 ```
 ```
-🔍 Discovering Docker workloads and volumes...
+========================================================================================
+🐳 Select Docker Containers to Backup (docker ps):
+Use [↑/↓] Navigate | [Space] Toggle | [a] Select All | [Enter] Confirm | [q] Cancel
+========================================================================================
+  [X]  1. web-production       nginx:alpine           Up 3 hours     Volumes: [web_data, web_logs]
+  [ ]  2. postgres-db          postgres:16            Up 3 hours     Volumes: [pgdata]
+> [X]  3. redis-cache          redis:7-alpine         Up 5 hours     Volumes: [redis_data]
+  [ ]  4. monitoring-grafana   grafana:latest         Up 1 day       Volumes: [grafana_storage]
+========================================================================================
+Selected: 2 of 4 container(s) | Press [Enter] to proceed
 
-Available targets for backup:
-  [1] production-web (web_data, web_logs)
-  [2] postgres-db (pgdata)
-  [3] redis-cache (no volumes)
-
-Enter target numbers separated by comma (e.g. 1, 2) or 'all': 1, 2
-Enter optional snapshot tag/note (or press Enter to skip): pre-update-checkpoint
+💾 Save this selection to config.yaml for automated/scheduled backups? (y/N): y
+Saved targets to /etc/docker-backuper/config.yaml
 ```
+
+> 💡 **Tip:** You can also configure targets anytime without triggering an immediate backup using `docker-backuper targets select`!
 
 ### 2. Backup via Docker Labels
 Add labels to your `docker-compose.yml` so `docker-backuper` automatically protects your service without editing configuration files:
@@ -381,6 +387,13 @@ docker-backuper restore -i
 
 # Direct restore to target volume
 docker-backuper restore -s /path/to/snapshot.tar.gz -v my_vol
+
+# ----------------- TARGETS MANAGEMENT -----------
+# Open interactive docker ps checklist to configure targets
+docker-backuper targets select
+
+# List targets currently saved in config.yaml
+docker-backuper targets list
 
 # ----------------- INSPECT & MANAGE -------------
 # List all snapshots

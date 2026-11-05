@@ -5,7 +5,13 @@ from pathlib import Path
 from typing import Any
 
 from docker_backuper import __version__
-from docker_backuper.config import AppConfig, TargetConfig, find_default_config_path, load_config
+from docker_backuper.config import (
+    AppConfig,
+    TargetConfig,
+    find_default_config_path,
+    load_config,
+    persist_targets_to_config,
+)
 from docker_backuper.core.backup_engine import BackupEngine
 from docker_backuper.core.docker_client import DockerClient
 from docker_backuper.core.restore_engine import RestoreEngine
@@ -13,6 +19,7 @@ from docker_backuper.core.retention import RetentionManager
 from docker_backuper.core.scheduler import Scheduler
 from docker_backuper.utils.lock import ProcessLock
 from docker_backuper.utils.logger import get_logger, setup_logger
+from docker_backuper.utils.tui import interactive_checklist
 from docker_backuper.utils.validator import format_bytes
 
 
@@ -34,7 +41,7 @@ def prompt_select(title: str, options: list[str]) -> int:
             print("Please enter a valid number.")
 
 
-def cmd_backup(args: argparse.Namespace, config: AppConfig, logger) -> int:
+def cmd_backup(args: argparse.Namespace, config: AppConfig, config_path: Path | None, logger) -> int:
     """Handles the 'backup' command (both manual and auto)."""
     docker_client = DockerClient()
     engine = BackupEngine(config, docker_client=docker_client)
@@ -49,35 +56,53 @@ def cmd_backup(args: argparse.Namespace, config: AppConfig, logger) -> int:
     try:
         targets: list[TargetConfig] = []
 
-        # Interactive manual selection
+        # Interactive manual checklist (docker ps)
         if getattr(args, "interactive", False):
-            print("\n🔍 Discovering Docker workloads and volumes...")
-            candidates = engine.discover_targets(all_volumes=True)
-            if not candidates:
-                print("No active Docker containers or volumes found.")
+            print("\n🔍 Discovering active Docker containers (docker ps)...")
+            raw_targets = engine.get_docker_ps_targets()
+
+            # If no running containers returned by ps, fall back to general target discovery
+            if not raw_targets:
+                fallback_targets = engine.discover_targets(all_volumes=True)
+                raw_targets = [
+                    {
+                        "name": t.name,
+                        "image": "",
+                        "status": "configured",
+                        "volumes": t.volumes,
+                        "compose_file": t.compose_file,
+                        "target_config": t,
+                    }
+                    for t in fallback_targets
+                ]
+
+            if not raw_targets:
+                print("❌ No active Docker containers or volumes found.")
                 return 0
 
-            print("\nAvailable targets for backup:")
-            for idx, c in enumerate(candidates, 1):
-                v_info = ", ".join(c.volumes) if c.volumes else "no volumes"
-                print(f"  [{idx}] {c.name} ({v_info})")
+            selected_indices = interactive_checklist(
+                raw_targets,
+                title="Select Docker Containers to Backup (docker ps):"
+            )
 
-            selected_input = input("\nEnter target numbers separated by comma (e.g. 1, 3) or 'all': ").strip()
-            if selected_input.lower() == "all":
-                targets = candidates
-            else:
-                try:
-                    indices = [int(i.strip()) - 1 for i in selected_input.split(",") if i.strip()]
-                    targets = [candidates[i] for i in indices if 0 <= i < len(candidates)]
-                except Exception:
-                    print("Invalid selection.")
-                    return 1
-
-            if not targets:
-                print("No targets selected. Aborting.")
+            if not selected_indices:
+                print("No containers selected. Backup cancelled.")
                 return 0
 
-            custom_tag = input("Enter optional snapshot tag/note (or press Enter to skip): ").strip()
+            targets = [raw_targets[i]["target_config"] for i in selected_indices]
+            print(f"\n✅ Selected {len(targets)} container(s) for backup:")
+            for t in targets:
+                v_str = f"Volumes: [{', '.join(t.volumes)}]" if t.volumes else "(No volumes)"
+                print(f"  • {t.name:<20} {v_str}")
+
+            # Option to save selection to config.yaml
+            save_opt = input("\n💾 Save this selection to config.yaml for automated/scheduled backups? (y/N): ").strip().lower()
+            if save_opt in ("y", "yes"):
+                target_cfg_path = config_path or Path("./config.yaml")
+                persist_targets_to_config(target_cfg_path, targets)
+                print(f"Saved targets to {target_cfg_path.resolve()}")
+
+            custom_tag = input("\nEnter optional snapshot tag/note (or press Enter to skip): ").strip()
             if custom_tag:
                 args.tag = custom_tag
         else:
@@ -298,6 +323,49 @@ def cmd_schedule(args: argparse.Namespace, config: AppConfig, config_path: Path,
         return 0
 
 
+def cmd_targets(args: argparse.Namespace, config: AppConfig, config_path: Path | None, logger) -> int:
+    """Manages target container configuration (interactive checklist and listing)."""
+    action = getattr(args, "target_action", "list")
+    target_cfg_path = config_path or Path("./config.yaml")
+
+    if action == "select":
+        docker_client = DockerClient()
+        engine = BackupEngine(config, docker_client=docker_client)
+        print("\n🔍 Discovering active Docker containers (docker ps)...")
+        raw_targets = engine.get_docker_ps_targets()
+        if not raw_targets:
+            print("❌ No active Docker containers found.")
+            return 1
+
+        selected_indices = interactive_checklist(
+            raw_targets,
+            title="Configure Targets for Automated Backup (docker ps):"
+        )
+        if not selected_indices:
+            print("No containers selected. Configuration unchanged.")
+            return 0
+
+        selected_targets = [raw_targets[i]["target_config"] for i in selected_indices]
+        persist_targets_to_config(target_cfg_path, selected_targets)
+        print(f"\n✅ Successfully saved {len(selected_targets)} target(s) to {target_cfg_path.resolve()}!")
+        for t in selected_targets:
+            v_str = f"Volumes: [{', '.join(t.volumes)}]" if t.volumes else "(No volumes)"
+            print(f"  • {t.name:<20} {v_str}")
+        return 0
+
+    else:
+        # List targets currently in config
+        print(f"\nConfigured targets in {target_cfg_path}:")
+        if not config.targets:
+            print("  (No targets configured yet. Run 'docker-backuper targets select' to configure)")
+            return 0
+        for idx, t in enumerate(config.targets, 1):
+            v_str = f"Volumes: [{', '.join(t.volumes)}]" if t.volumes else "(No volumes)"
+            comp = f"Compose: {t.compose_file}" if t.compose_file else ""
+            print(f"  [{idx}] {t.name:<20} {v_str} {comp}")
+        return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="docker-backuper",
@@ -351,6 +419,12 @@ def main():
     sched_sub.add_parser("status", help="Check status of automated schedule")
     sched_sub.add_parser("remove", help="Remove systemd timer or cron job")
 
+    # targets
+    p_targets = subparsers.add_parser("targets", help="View or interactively select target containers from docker ps")
+    targets_sub = p_targets.add_subparsers(dest="target_action", help="Targets action")
+    targets_sub.add_parser("list", help="List targets saved in config.yaml")
+    targets_sub.add_parser("select", help="Open interactive docker ps checklist to configure targets in config.yaml")
+
     args = parser.parse_args()
 
     if not args.subcommand:
@@ -365,7 +439,7 @@ def main():
     logger = setup_logger(log_file=config.logging.file, level=config.logging.level)
 
     if args.subcommand == "backup":
-        sys.exit(cmd_backup(args, config, logger))
+        sys.exit(cmd_backup(args, config, config_path, logger))
     elif args.subcommand == "restore":
         sys.exit(cmd_restore(args, config, logger))
     elif args.subcommand == "list":
@@ -376,6 +450,8 @@ def main():
         sys.exit(cmd_prune(args, config, logger))
     elif args.subcommand == "schedule":
         sys.exit(cmd_schedule(args, config, config_path or Path("./config.yaml"), logger))
+    elif args.subcommand == "targets":
+        sys.exit(cmd_targets(args, config, config_path, logger))
     else:
         parser.print_help()
         sys.exit(1)

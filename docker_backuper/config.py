@@ -147,3 +147,69 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         targets=targets,
         logging=logging_cfg,
     )
+
+
+def persist_targets_to_config(config_path: Path, new_targets: list[TargetConfig]) -> bool:
+    """
+    Saves or merges selected targets into the config file (YAML or JSON).
+    Preserves existing storage, retention, and default settings.
+    """
+    config_path = Path(config_path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    data: dict[str, Any] = {}
+    if config_path.is_file():
+        try:
+            data = _load_yaml_or_json(config_path)
+        except Exception:
+            data = {}
+
+    if not data:
+        data = {
+            "version": "1.0",
+            "storage": {
+                "destination_dir": "/var/backups/docker-backuper" if os.name != "nt" else "./backups",
+                "compression": "gzip",
+                "compression_level": 6,
+            },
+            "retention": {
+                "keep_days": 7,
+                "max_snapshots_per_target": 10,
+                "min_disk_free_gb": 2.0,
+            },
+            "defaults": {
+                "pause_container": True,
+                "backup_compose_files": True,
+            },
+            "targets": [],
+            "logging": {
+                "file": "/var/log/docker-backuper.log" if os.name != "nt" else "./docker-backuper.log",
+                "level": "INFO",
+            },
+        }
+
+    # Merge targets by name
+    existing_targets = data.get("targets", [])
+    target_dict = {}
+    for et in existing_targets:
+        if isinstance(et, dict) and "name" in et:
+            target_dict[et["name"]] = et
+
+    for nt in new_targets:
+        target_dict[nt.name] = {
+            "name": nt.name,
+            "compose_file": nt.compose_file,
+            "volumes": nt.volumes,
+            "pause_during_backup": nt.pause_during_backup,
+        }
+
+    data["targets"] = list(target_dict.values())
+
+    try:
+        import yaml
+        content = yaml.dump(data, sort_keys=False, default_flow_style=False)
+    except ImportError:
+        content = json.dumps(data, indent=2)
+
+    config_path.write_text(content, encoding="utf-8")
+    return True
