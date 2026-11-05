@@ -145,101 +145,140 @@ def cmd_backup(args: argparse.Namespace, config: AppConfig, config_path: Path | 
 
 
 def cmd_restore(args: argparse.Namespace, config: AppConfig, logger) -> int:
-    """Handles the 'restore' command (interactive wizard and direct flags)."""
+    """Handles the 'restore' command (interactive TUI checklist and direct flags)."""
     docker_client = DockerClient()
     engine = RestoreEngine(config, docker_client=docker_client)
 
-    snapshot_path = None
+    snapshot_args = getattr(args, "snapshot", None)
     target_volume = getattr(args, "target_volume", None)
     auto_start = getattr(args, "auto_start", False)
     compose_out = Path(args.compose_dir) if getattr(args, "compose_dir", None) else None
 
-    # Interactive Wizard Mode
-    if getattr(args, "interactive", False) or not getattr(args, "snapshot", None):
+    # Interactive TUI Checklist Mode
+    if getattr(args, "interactive", False) or not snapshot_args:
         snapshots = engine.list_snapshots()
         if not snapshots:
-            print("\n❌ No backup snapshots found in:", config.storage.destination_dir)
+            print(f"\n❌ No backup snapshots found in: {config.storage.destination_dir}")
             return 1
 
-        options = [
-            f"{s['filename']} | Target: {s['target_name']} | Date: {s['timestamp']} | Size: {s['size_formatted']}"
-            for s in snapshots
-        ]
-        choice_idx = prompt_select("📦 Select a backup snapshot to restore:", options)
-        selected_snap = snapshots[choice_idx]
-        snapshot_path = Path(selected_snap["path"])
+        items = []
+        for s in snapshots:
+            items.append({
+                "name": s["target_name"],
+                "image": s["timestamp"],
+                "status": s["size_formatted"],
+                "volumes": s["volumes"],
+                "snapshot_data": s,
+            })
 
-        print(f"\nSnapshot details: {selected_snap['filename']}")
-        print(f"Target Project: {selected_snap['target_name']}")
-        print(f"Volumes inside: {', '.join(selected_snap['volumes']) or '(None)'}")
-        if selected_snap.get("compose_file"):
-            print(f"Compose file:   {selected_snap['compose_file']}")
+        selected_indices = interactive_checklist(
+            items,
+            title="Select Backup Snapshots to Restore (Multi-Select):"
+        )
 
-        vol_options = selected_snap["volumes"]
-        vol_mapping = {}
+        if not selected_indices:
+            print("No snapshots selected. Restore cancelled.")
+            return 0
 
-        if vol_options:
-            dest_choice = prompt_select(
-                "\nRestore target volume configuration:",
-                [
-                    "Restore to original volume name(s) (Overwrite)",
-                    "Restore to custom/new volume name(s) (Staging / Safe test)",
-                ]
-            )
+        selected_snapshots = [snapshots[i] for i in selected_indices]
 
-            if dest_choice == 0:
-                vol_mapping = {v: v for v in vol_options}
-            else:
-                for v in vol_options:
-                    custom_name = input(f"Enter destination name for volume '{v}' [default: {v}_restored]: ").strip()
-                    vol_mapping[v] = custom_name if custom_name else f"{v}_restored"
+        print(f"\n📦 Selected {len(selected_snapshots)} snapshot(s) to restore:")
+        for s in selected_snapshots:
+            v_info = ", ".join(s["volumes"]) if s["volumes"] else "(No volumes)"
+            comp_info = f"| Compose: {s['compose_file']}" if s.get("compose_file") else ""
+            print(f"  • {s['filename']:<44} Target: {s['target_name']:<16} Volumes: [{v_info}] {comp_info}")
 
-        if selected_snap.get("compose_file"):
+        # Volume restore strategy
+        dest_choice = prompt_select(
+            "\nRestore target volume configuration:",
+            [
+                "Restore to original volume name(s) (Overwrite / In-Place)",
+                "Restore to staging volume name(s) (e.g. <volume>_restored)",
+            ]
+        )
+        use_staging_prefix = (dest_choice == 1)
+
+        # Check compose extraction
+        has_compose = any(s.get("compose_file") for s in selected_snapshots)
+        base_compose_dir = None
+        if has_compose:
             comp_confirm = input("\nDo you want to extract docker-compose files? (y/N): ").strip().lower()
             if comp_confirm in ("y", "yes"):
-                c_dir = input("Destination directory for compose files [default: ./restored_compose]: ").strip()
-                compose_out = Path(c_dir if c_dir else "./restored_compose")
-                start_confirm = input("Run 'docker compose up -d' immediately after restore? (y/N): ").strip().lower()
+                c_dir = input("Base destination directory for compose files [default: ./restored_compose]: ").strip()
+                base_compose_dir = Path(c_dir if c_dir else "./restored_compose")
+                start_confirm = input("Run 'docker compose up -d' immediately for restored stacks? (y/N): ").strip().lower()
                 auto_start = start_confirm in ("y", "yes")
 
-        confirm = input("\nProceed with restoration? (y/N): ").strip().lower()
+        confirm = input(f"\nProceed with restoring {len(selected_snapshots)} snapshot(s)? (y/N): ").strip().lower()
         if confirm not in ("y", "yes"):
             print("Restore cancelled by user.")
             return 0
 
-        res = engine.execute_restore(
-            snapshot_path=snapshot_path,
-            volume_mapping=vol_mapping,
-            auto_start=auto_start,
-            compose_output_dir=compose_out,
-        )
-        print("\n✅ Restore completed successfully!")
-        print(f"Restored volumes: {', '.join(res['restored_volumes'])}")
-        return 0
+        success_count = 0
+        for s in selected_snapshots:
+            snap_path = Path(s["path"])
+            vols = s["volumes"]
+            if use_staging_prefix:
+                vol_mapping = {v: f"{v}_restored" for v in vols}
+            else:
+                vol_mapping = {v: v for v in vols}
 
-    # Direct Flags Mode
-    snapshot_path = Path(args.snapshot).resolve()
-    if not snapshot_path.is_file():
-        logger.error("Snapshot archive not found at: %s", snapshot_path)
-        return 1
+            comp_dest = None
+            if base_compose_dir:
+                comp_dest = (base_compose_dir / s["target_name"]) if len(selected_snapshots) > 1 else base_compose_dir
 
-    manifest = engine.verify_snapshot(snapshot_path).get("manifest", {})
-    volumes = manifest.get("volumes", [])
+            try:
+                res = engine.execute_restore(
+                    snapshot_path=snap_path,
+                    volume_mapping=vol_mapping,
+                    auto_start=auto_start,
+                    compose_output_dir=comp_dest,
+                )
+                success_count += 1
+                logger.info("Successfully restored snapshot '%s' (Volumes: %s)", s["filename"], res.get("restored_volumes"))
+            except Exception as e:
+                logger.error("Failed restoring snapshot '%s': %s", s["filename"], e)
 
-    vol_mapping = {}
-    if target_volume and volumes:
-        vol_mapping = {volumes[0]: target_volume}
-    else:
-        vol_mapping = {v: v for v in volumes}
+        print("\n" + "=" * 90)
+        print(f"🎉 Restore Summary: {success_count}/{len(selected_snapshots)} snapshot(s) restored successfully.")
+        print("=" * 90)
+        return 0 if success_count == len(selected_snapshots) else 1
 
-    res = engine.execute_restore(
-        snapshot_path=snapshot_path,
-        volume_mapping=vol_mapping,
-        auto_start=auto_start,
-        compose_output_dir=compose_out,
-    )
-    logger.info("Restore completed successfully: %s", res)
-    return 0
+    # Direct Flags Mode (single or multiple snapshot paths)
+    snapshot_paths = [Path(p).resolve() for p in (snapshot_args if isinstance(snapshot_args, list) else [snapshot_args])]
+    success_count = 0
+
+    for idx, snap_path in enumerate(snapshot_paths):
+        if not snap_path.is_file():
+            logger.error("Snapshot archive not found at: %s", snap_path)
+            continue
+
+        manifest = engine.verify_snapshot(snap_path).get("manifest", {})
+        volumes = manifest.get("volumes", [])
+
+        vol_mapping = {}
+        if target_volume and volumes and len(snapshot_paths) == 1:
+            vol_mapping = {volumes[0]: target_volume}
+        else:
+            vol_mapping = {v: v for v in volumes}
+
+        comp_dest = None
+        if compose_out:
+            comp_dest = (compose_out / manifest.get("target_name", f"target_{idx}")) if len(snapshot_paths) > 1 else compose_out
+
+        try:
+            res = engine.execute_restore(
+                snapshot_path=snap_path,
+                volume_mapping=vol_mapping,
+                auto_start=auto_start,
+                compose_output_dir=comp_dest,
+            )
+            success_count += 1
+            logger.info("Restore completed successfully for %s: %s", snap_path.name, res)
+        except Exception as e:
+            logger.error("Failed restore for %s: %s", snap_path.name, e)
+
+    return 0 if success_count == len(snapshot_paths) else 1
 
 
 def cmd_list(args: argparse.Namespace, config: AppConfig, logger) -> int:
@@ -388,9 +427,9 @@ def main():
 
     # restore
     p_restore = subparsers.add_parser("restore", help="Restore Docker volume and configuration from snapshot")
-    p_restore.add_argument("-s", "--snapshot", help="Path to snapshot archive (.tar.gz)")
-    p_restore.add_argument("-v", "--target-volume", help="Target volume name to restore data into")
-    p_restore.add_argument("-i", "--interactive", action="store_true", help="Interactive restore wizard")
+    p_restore.add_argument("-s", "--snapshot", nargs="*", help="Path(s) to snapshot archive(s) (.tar.gz)")
+    p_restore.add_argument("-v", "--target-volume", help="Target volume name to restore data into (single snapshot only)")
+    p_restore.add_argument("-i", "--interactive", action="store_true", help="Interactive multi-select restore checklist")
     p_restore.add_argument("--compose-dir", help="Directory where docker-compose.yml should be extracted")
     p_restore.add_argument("--auto-start", action="store_true", help="Automatically run docker compose up -d")
 

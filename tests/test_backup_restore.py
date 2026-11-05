@@ -124,6 +124,29 @@ class TestBackupRestoreEngine(unittest.TestCase):
         self.assertIn("pg_data_restored", restore_res["restored_volumes"])
         self.assertIn("pg_data_restored", self.mock_docker.volumes_created)
 
+    def test_multi_restore_batch(self):
+        # Create 2 separate target backups
+        target1 = TargetConfig(name="app1", volumes=["vol_app1"], pause_during_backup=False)
+        target2 = TargetConfig(name="app2", volumes=["vol_app2"], pause_during_backup=False)
+
+        res1 = self.backup_engine.run_backup(target1)
+        res2 = self.backup_engine.run_backup(target2)
+
+        self.assertTrue(res1["success"])
+        self.assertTrue(res2["success"])
+
+        # Multi-restore both snapshots
+        snap1_path = Path(res1["snapshot_path"])
+        snap2_path = Path(res2["snapshot_path"])
+
+        rest1 = self.restore_engine.execute_restore(snap1_path, volume_mapping={"vol_app1": "vol_app1_restored"})
+        rest2 = self.restore_engine.execute_restore(snap2_path, volume_mapping={"vol_app2": "vol_app2_restored"})
+
+        self.assertTrue(rest1["success"])
+        self.assertTrue(rest2["success"])
+        self.assertIn("vol_app1_restored", self.mock_docker.volumes_created)
+        self.assertIn("vol_app2_restored", self.mock_docker.volumes_created)
+
 
 if __name__ == "__main__":
     unittest.main()

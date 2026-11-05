@@ -24,6 +24,7 @@ htmlcov/
 config.yaml
 /var/backups/
 backups/
+restored_compose/
 *.tar.gz
 *.lock
 *.log

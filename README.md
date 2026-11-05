@@ -191,25 +191,38 @@ docker-backuper backup
 ```
 The tool will automatically detect `production-db`, pause the container, archive `pgdata`, verify checksums, unpause the container, and save the snapshot!
 
-### 3. Interactive Restore Wizard
-Need to recover data? Run the restore wizard:
+### 3. Interactive Multi-Restore Checklist
+Need to recover one or multiple containers and volumes? Run the multi-restore checklist:
 ```bash
 docker-backuper restore -i
 ```
 ```
-📦 Select a backup snapshot to restore:
-  [1] snapshot-production-db-20261105_020000.tar.gz | Target: production-db | Date: 2026-11-05 02:00:00 | Size: 184.20 MB
-  [2] snapshot-production-web-20261104_183000.tar.gz | Target: production-web | Date: 2026-11-04 18:30:00 | Size: 45.10 MB
+========================================================================================
+🐳 Select Backup Snapshots to Restore (Multi-Select):
+Use [↑/↓] Navigate | [Space] Toggle | [a] Select All | [Enter] Confirm | [q] Cancel
+========================================================================================
+> [X]  1. production-db        2026-11-05 02:00:00    184.20 MB      Volumes: [pgdata]
+  [X]  2. production-web       2026-11-04 18:30:00     45.10 MB      Volumes: [web_data, web_logs]
+  [ ]  3. redis-cache          2026-11-04 12:00:00      2.50 MB      Volumes: [redis_data]
+========================================================================================
+Selected: 2 of 3 snapshot(s) | Press [Enter] to proceed
 
-Select option (1-2) [default 1]: 1
+📦 Selected 2 snapshot(s) to restore:
+  • snapshot-production-db-20261105_020000.tar.gz  Target: production-db    Volumes: [pgdata]
+  • snapshot-production-web-20261104_183000.tar.gz Target: production-web   Volumes: [web_data, web_logs]
 
 Restore target volume configuration:
-  [1] Restore to original volume name(s) (Overwrite)
-  [2] Restore to custom/new volume name(s) (Staging / Safe test)
+  [1] Restore to original volume name(s) (Overwrite / In-Place)
+  [2] Restore to staging volume name(s) (e.g. <volume>_restored)
 
 Select option (1-2) [default 1]: 1
-Proceed with restoration? (y/N): y
-✅ Restore completed successfully!
+
+Do you want to extract docker-compose files? (y/N): y
+Base destination directory for compose files [default: ./restored_compose]: 
+Run 'docker compose up -d' immediately for restored stacks? (y/N): y
+
+Proceed with restoring 2 snapshot(s)? (y/N): y
+🎉 Restore Summary: 2/2 snapshot(s) restored successfully.
 ```
 
 ---
