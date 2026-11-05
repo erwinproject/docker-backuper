@@ -25,6 +25,8 @@ class DefaultsConfig:
     backup_compose_files: bool = True
     backup_images: bool = True
     standalone_compose: bool = True
+    hot_db_dump: bool = True
+    db_dump_timeout_seconds: int = 300
 
 
 @dataclass
@@ -121,6 +123,8 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         backup_compose_files=bool(d_data.get("backup_compose_files", True)),
         backup_images=bool(d_data.get("backup_images", True)),
         standalone_compose=bool(d_data.get("standalone_compose", True)),
+        hot_db_dump=bool(d_data.get("hot_db_dump", True)),
+        db_dump_timeout_seconds=int(d_data.get("db_dump_timeout_seconds", 300)),
     )
 
     # Targets
@@ -184,6 +188,10 @@ def persist_targets_to_config(config_path: Path, new_targets: list[TargetConfig]
             "defaults": {
                 "pause_container": True,
                 "backup_compose_files": True,
+                "backup_images": True,
+                "standalone_compose": True,
+                "hot_db_dump": True,
+                "db_dump_timeout_seconds": 300,
             },
             "targets": [],
             "logging": {

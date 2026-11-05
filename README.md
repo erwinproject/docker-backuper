@@ -50,8 +50,9 @@ Docker containers are ephemeral, but their data is not. While stateless containe
 ## Key Features
 
 - **🚀 Dual Mode (Auto & Manual):** Run ad-hoc backups anytime or let the OS scheduler trigger silent auto-backups.
+- **⚡ Zero-Downtime Hot Database Dump:** Automatically detects MySQL, MariaDB, and PostgreSQL containers. Extracts credentials from container environment variables and runs native logical dumps (`mysqldump --single-transaction` and `pg_dumpall --clean`) without pausing the container.
 - **✈️ Zero-Dependency Standalone Migration:** Automatically exports Docker images (`docker save`) and embeds running environment variables into a self-contained `docker-compose.yml`. You can migrate to any fresh server without needing original source code, Git repos, or local project files!
-- **⏸️ Safe Pause & Resume Lifecycle:** Prevents dirty writes by momentarily pausing target containers during volume archiving, wrapped in a strict `try...finally` guarantee that unpauses containers even if an error occurs.
+- **⏸️ Safe Pause & Resume Lifecycle:** Prevents dirty writes on application containers by momentarily pausing them during volume archiving, wrapped in a strict `try...finally` guarantee that unpauses containers even if an error occurs.
 - **🏷️ Hybrid Target Discovery:** Automatically discovers what to back up via Docker Labels (`docker-backuper.enable=true`), explicit entries in `config.yaml`, or a host-wide `--all` sweep.
 - **🔒 Process Concurrency Guard:** Uses an atomic PID lockfile to ensure scheduled runs never overlap.
 - **🛡️ Pre-Flight Disk Safety Check:** Calculates required space before archiving. If disk free space is below your safety threshold (e.g., 2 GB), it aborts safely without filling the disk.
@@ -267,6 +268,13 @@ defaults:
   pause_container: true
   # Archive compose files and .env if present
   backup_compose_files: true
+  # Export Docker image layers for zero-dependency migration
+  backup_images: true
+  # Generate self-contained docker-compose.yml with embedded env vars
+  standalone_compose: true
+  # Zero-downtime hot logical dump for MySQL, MariaDB, and PostgreSQL containers
+  hot_db_dump: true
+  db_dump_timeout_seconds: 300
 
 targets:
   # Explicit static targets (can also be discovered via labels)
@@ -437,6 +445,12 @@ docker-backuper backup --dry-run
 
 # Automated scheduled execution (used by cron/timer)
 docker-backuper backup --auto
+
+# Backup without exporting heavy Docker images (volume-only archive)
+docker-backuper backup --no-images
+
+# Backup without hot DB dump (forces traditional volume pause)
+docker-backuper backup --no-db-dump
 
 # -------------------- RESTORE -------------------
 # Interactive restore wizard

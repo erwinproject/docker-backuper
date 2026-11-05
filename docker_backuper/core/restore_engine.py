@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from docker_backuper.config import AppConfig
+from docker_backuper.core.db_engine import DatabaseDumpManager
 from docker_backuper.core.docker_client import DockerClient
 from docker_backuper.utils.archive import (
     calculate_sha256,
@@ -20,9 +21,15 @@ logger = get_logger()
 class RestoreEngine:
     """Manages snapshot inspection, integrity verification, volume data restoration, and compose bring-up."""
 
-    def __init__(self, config: AppConfig, docker_client: DockerClient | None = None):
+    def __init__(
+        self,
+        config: AppConfig,
+        docker_client: DockerClient | None = None,
+        db_manager: DatabaseDumpManager | None = None,
+    ):
         self.config = config
         self.docker = docker_client or DockerClient()
+        self.db_manager = db_manager or DatabaseDumpManager()
         self.dest_dir = Path(config.storage.destination_dir).resolve()
 
     def list_snapshots(self, target_filter: str | None = None) -> list[dict[str, Any]]:
@@ -170,10 +177,47 @@ class RestoreEngine:
                     self.docker.run_compose_up(f)
                     break
 
+        # 5. Restore Database Dumps if present
+        imported_db = False
+        db_engine = manifest.get("db_engine")
+        db_dump_rel = manifest.get("db_dump")
+
+        if db_engine and db_dump_rel:
+            with tempfile.TemporaryDirectory(prefix="docker_restore_db_") as tmp_dir_str:
+                tmp_dir = Path(tmp_dir_str)
+                try:
+                    extract_archive(snapshot_path, tmp_dir, subpath="db_dumps")
+                    dump_path = tmp_dir / Path(db_dump_rel).name
+
+                    if compose_output_dir and dump_path.is_file():
+                        db_dest_dir = compose_output_dir / "db_dumps"
+                        db_dest_dir.mkdir(parents=True, exist_ok=True)
+                        import shutil
+                        shutil.copy2(dump_path, db_dest_dir / dump_path.name)
+                        logger.info("Saved database dump copy to: %s", db_dest_dir / dump_path.name)
+
+                    target_container = manifest.get("target_name")
+                    if auto_start and dump_path.is_file() and target_container:
+                        c_info = self.docker.inspect_container(target_container)
+                        creds = self.db_manager.extract_credentials(c_info, db_engine) if c_info else {}
+                        if not creds.get("user") and manifest.get("db_user"):
+                            creds["user"] = manifest.get("db_user")
+                        if not creds.get("database") and manifest.get("db_name"):
+                            creds["database"] = manifest.get("db_name")
+
+                        timeout = getattr(self.config.defaults, "db_dump_timeout_seconds", 300)
+                        if self.db_manager.wait_for_ready(target_container, db_engine, creds, timeout_seconds=60):
+                            imported_db = self.db_manager.import_hot_dump(target_container, db_engine, creds, dump_path, timeout=timeout)
+                        else:
+                            logger.warning("Database container '%s' was not ready in time. Dump preserved at %s", target_container, compose_output_dir or dump_path)
+                except Exception as e:
+                    logger.debug("Error during DB dump restoration: %s", e)
+
         return {
             "snapshot": str(snapshot_path),
             "loaded_images": loaded_imgs,
             "restored_volumes": restored_vols,
             "restored_compose": [str(p) for p in restored_compose],
+            "imported_db": imported_db,
             "success": True,
         }

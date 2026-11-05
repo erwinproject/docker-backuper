@@ -141,7 +141,7 @@ class TestBackupRestoreEngine(unittest.TestCase):
         self.config = AppConfig(
             storage=StorageConfig(destination_dir=str(self.base_dir / "backups")),
             retention=RetentionConfig(keep_days=7, min_disk_free_gb=0.1),
-            defaults=DefaultsConfig(pause_container=True),
+            defaults=DefaultsConfig(pause_container=True, hot_db_dump=False),
         )
         self.mock_docker = MockDockerClient()
         self.backup_engine = BackupEngine(self.config, docker_client=self.mock_docker)

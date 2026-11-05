@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from docker_backuper.config import AppConfig, TargetConfig
+from docker_backuper.core.db_engine import DatabaseDumpManager
 from docker_backuper.core.docker_client import DockerClient
 from docker_backuper.utils.archive import calculate_sha256, create_archive
 from docker_backuper.utils.logger import get_logger
@@ -18,9 +19,15 @@ logger = get_logger()
 class BackupEngine:
     """Orchestrates container discovery, safe pause, snapshot creation, and verification."""
 
-    def __init__(self, config: AppConfig, docker_client: DockerClient | None = None):
+    def __init__(
+        self,
+        config: AppConfig,
+        docker_client: DockerClient | None = None,
+        db_manager: DatabaseDumpManager | None = None,
+    ):
         self.config = config
         self.docker = docker_client or DockerClient()
+        self.db_manager = db_manager or DatabaseDumpManager()
         self.dest_dir = Path(config.storage.destination_dir).resolve()
 
     def discover_targets(self, explicit_target: str | None = None, all_volumes: bool = False) -> list[TargetConfig]:
@@ -272,19 +279,52 @@ class BackupEngine:
             source_map: dict[str, Path] = {}
             containers_to_resume: list[str] = []
 
+            # Inspect container to check for DB engine or image
+            c_info = self.docker.inspect_container(target.name) if self.docker.is_available() else {}
+            hot_db_enabled = getattr(self.config.defaults, "hot_db_dump", True)
+            db_engine = self.db_manager.detect_engine(c_info) if (hot_db_enabled and c_info) else None
+            db_dump_file = None
+            db_creds: dict[str, str] = {}
+
             try:
                 # 1. Determine running containers that use these volumes
                 if target.pause_during_backup and self.docker.is_available():
                     containers = self.docker.list_containers(all_containers=False)
                     for c in containers:
                         c_name = c["name"]
+                        # If this container is the active DB container and hot dump is enabled, skip pause for zero downtime!
+                        if db_engine and c_name == target.name:
+                            logger.info("Database container '%s' (%s) detected. Bypassing container pause for zero-downtime hot dump.", c_name, db_engine)
+                            continue
+
                         c_vols = {m["name"] for m in c.get("mounts", []) if m.get("name")}
                         if any(v in c_vols for v in target.volumes) or c_name == target.name:
                             if c.get("running") and not c.get("paused"):
                                 if self.docker.pause_container(c_name):
                                     containers_to_resume.append(c_name)
 
-                # 2. Export each volume
+                # 2. Hot Database Dump (Zero Downtime)
+                if db_engine and c_info:
+                    db_creds = self.db_manager.extract_credentials(c_info, db_engine)
+                    dumps_dir = staging_dir / "db_dumps"
+                    dumps_dir.mkdir(parents=True, exist_ok=True)
+                    dump_filename = f"{target.name}.sql.gz"
+                    dump_path = dumps_dir / dump_filename
+                    timeout = getattr(self.config.defaults, "db_dump_timeout_seconds", 300)
+
+                    if self.docker.is_available():
+                        success = self.db_manager.execute_hot_dump(target.name, db_engine, db_creds, dump_path, timeout=timeout)
+                        if success:
+                            source_map[f"db_dumps/{dump_filename}"] = dump_path
+                            db_dump_file = dump_filename
+                        else:
+                            logger.warning("Hot DB dump failed for '%s'. Continuing with volume backup.", target.name)
+                    else:
+                        dump_path.write_bytes(b"mock-sql-dump-data")
+                        source_map[f"db_dumps/{dump_filename}"] = dump_path
+                        db_dump_file = dump_filename
+
+                # 3. Export each volume
                 for vol_name in target.volumes:
                     vol_tar = volumes_dir / f"{vol_name}.tar"
                     if self.docker.is_available():
@@ -297,9 +337,8 @@ class BackupEngine:
 
                     source_map[f"volumes/{vol_name}.tar"] = vol_tar
 
-                # 3. Export Docker Images (for 100% zero-dependency migration)
+                # 4. Export Docker Images (for 100% zero-dependency migration)
                 saved_images = []
-                c_info = self.docker.inspect_container(target.name) if self.docker.is_available() else {}
                 img_name = c_info.get("image") or ""
 
                 if getattr(self.config.defaults, "backup_images", True) and img_name:
@@ -317,7 +356,7 @@ class BackupEngine:
                         source_map[f"images/{safe_img_file}"] = img_tar
                         saved_images.append(img_name)
 
-                # 4. Generate Standalone docker-compose.yml or copy existing
+                # 5. Generate Standalone docker-compose.yml or copy existing
                 compose_saved_name = None
                 if getattr(self.config.defaults, "standalone_compose", True) and c_info:
                     standalone_content = self.generate_standalone_compose(c_info, target.volumes)
@@ -348,7 +387,7 @@ class BackupEngine:
                     except Exception as e:
                         logger.critical("CRITICAL: Failed to unpause container '%s': %s", c_name, e)
 
-            # 5. Construct Manifest Metadata
+            # 6. Construct Manifest Metadata
             manifest = {
                 "version": "1.0",
                 "snapshot_id": f"{target.name}-{timestamp_str}",
@@ -359,6 +398,10 @@ class BackupEngine:
                 "images": saved_images,
                 "compose_file": compose_saved_name,
                 "standalone": True,
+                "db_engine": db_engine,
+                "db_dump": db_dump_file,
+                "db_user": db_creds.get("user") if db_creds else None,
+                "db_name": db_creds.get("database") if db_creds else None,
                 "tag": tag,
             }
 

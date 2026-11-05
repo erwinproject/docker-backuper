@@ -20,6 +20,13 @@ defaults:
   pause_container: true
   # Auto-backup compose files if found
   backup_compose_files: true
+  # Export Docker image layers for zero-dependency migration
+  backup_images: true
+  # Generate self-contained docker-compose.yml with embedded env vars
+  standalone_compose: true
+  # Zero-downtime hot logical dump for MySQL, MariaDB, and PostgreSQL containers
+  hot_db_dump: true
+  db_dump_timeout_seconds: 300
 
 # Explicit targets (Optional: can also be discovered automatically via Docker labels)
 targets:
