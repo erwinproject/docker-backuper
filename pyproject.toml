@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "docker-backuper"
+version = "1.0.0"
+description = "Dual-mode (Auto & Manual) Docker volume and configuration backup and restore tool"
+authors = [{ name = "Erwin Project" }]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+docker = [
+    "docker>=6.1.0",
+]
+
+[project.scripts]
+docker-backuper = "docker_backuper.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["docker_backuper*"]

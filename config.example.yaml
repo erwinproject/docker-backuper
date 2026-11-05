@@ -1,0 +1,34 @@
+# docker-backuper configuration example
+version: "1.0"
+
+storage:
+  # Directory where backup snapshots will be saved
+  destination_dir: "./backups"  # Default on Linux: /var/backups/docker-backuper
+  compression: "gzip"
+  compression_level: 6
+
+retention:
+  # Number of days to keep backup archives
+  keep_days: 7
+  # Maximum snapshots to keep per target project
+  max_snapshots_per_target: 10
+  # Minimum required free disk space in GB before running backup
+  min_disk_free_gb: 2.0
+
+defaults:
+  # Pause container during volume archive to ensure disk write consistency
+  pause_container: true
+  # Auto-backup compose files if found
+  backup_compose_files: true
+
+# Explicit targets (Optional: can also be discovered automatically via Docker labels)
+targets:
+  - name: "my-app"
+    compose_file: "./docker-compose.yml"
+    volumes:
+      - "app_data"
+    pause_during_backup: true
+
+logging:
+  file: "./docker-backuper.log"  # Default on Linux: /var/log/docker-backuper.log
+  level: "INFO"                 # DEBUG | INFO | WARNING | ERROR
