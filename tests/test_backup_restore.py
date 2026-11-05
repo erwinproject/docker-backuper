@@ -14,6 +14,10 @@ class MockDockerClient:
         self.volumes_created = []
         self.saved_images = []
         self.loaded_images = []
+        self.started = []
+        self.stopped = []
+        self.compose_up = []
+        self.compose_down = []
 
     def is_available(self) -> bool:
         return True
@@ -58,6 +62,14 @@ class MockDockerClient:
         self.unpaused.append(name)
         return True
 
+    def start_container(self, name):
+        self.started.append(name)
+        return True
+
+    def stop_container(self, name):
+        self.stopped.append(name)
+        return True
+
     def create_volume(self, name):
         self.volumes_created.append(name)
         return True
@@ -88,7 +100,36 @@ class MockDockerClient:
         return True
 
     def run_compose_up(self, compose_file):
+        self.compose_up.append(str(compose_file))
         return True
+
+    def run_compose_down(self, compose_file):
+        self.compose_down.append(str(compose_file))
+        return True
+
+    def get_stopped_containers(self):
+        return [c for c in self.list_containers(all_containers=True) if not c.get("running")]
+
+    def get_running_containers(self):
+        return [c for c in self.list_containers(all_containers=True) if c.get("running")]
+
+    def discover_local_compose_projects(self, search_dirs=None):
+        return []
+
+    discover_local_compose_stacks = discover_local_compose_projects
+
+    def _inspect_compose_file(self, compose_path):
+        p = Path(compose_path)
+        name = p.parent.name if p.parent.name not in ("", ".") else p.stem
+        return {
+            "name": name,
+            "image": "mock-image:latest",
+            "status": "compose",
+            "volumes": [],
+            "compose_file": str(compose_path),
+            "services": ["app"],
+            "type": "compose",
+        }
 
 
 class TestBackupRestoreEngine(unittest.TestCase):

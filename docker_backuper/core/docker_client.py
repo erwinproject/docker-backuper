@@ -238,11 +238,14 @@ class DockerClient:
                 c = self._sdk_client.containers.get(container_id_or_name)
                 c.start()
                 return True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("SDK start failed: %s. Trying CLI.", e)
 
         res = subprocess.run(["docker", "start", container_id_or_name], capture_output=True, text=True)
-        return res.returncode == 0
+        if res.returncode != 0:
+            logger.error("Failed to start container %s: %s", container_id_or_name, res.stderr.strip())
+            return False
+        return True
 
     def create_volume(self, volume_name: str) -> bool:
         """Creates a Docker volume if it doesn't already exist."""
@@ -321,6 +324,137 @@ class DockerClient:
         except Exception as e:
             logger.error("Failed to execute docker compose up: %s", e)
             return False
+
+    def run_compose_down(self, compose_file_path: str | Path) -> bool:
+        """Runs docker compose down for a specific compose file."""
+        compose_path = Path(compose_file_path).resolve()
+        logger.info("Executing docker compose down for %s", compose_path)
+
+        cmd = ["docker", "compose", "-f", str(compose_path), "down"]
+        try:
+            res = subprocess.run(cmd, cwd=str(compose_path.parent), capture_output=True, text=True, check=True)
+            logger.info("Compose stopped successfully:\n%s", res.stdout)
+            return True
+        except subprocess.CalledProcessError as e:
+            err_msg = (e.stderr or e.stdout or str(e)).strip()
+            logger.error("Failed to execute docker compose down:\n%s", err_msg)
+            return False
+        except Exception as e:
+            logger.error("Failed to execute docker compose down: %s", e)
+            return False
+
+    def discover_local_compose_projects(self, search_dirs: list[Path | str] | None = None) -> list[dict[str, Any]]:
+        """
+        Discovers local docker-compose files across search directories.
+        Returns a list of dicts with keys: name, image, status, volumes, compose_file, services, type.
+        """
+        # ponytail: 1-level subdirectory crawl covers standard project and restored_compose trees.
+        # Upgrade path: add recursive walking with ignore filters if deeper arbitrary nesting is required.
+        if search_dirs is None:
+            search_dirs = [Path("./restored_compose"), Path(".")]
+
+        compose_names = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
+        discovered_files: list[Path] = []
+        seen_paths: set[str] = set()
+
+        for d in search_dirs:
+            if not d:
+                continue
+            p = Path(d)
+            if not p.exists():
+                continue
+
+            if p.is_file():
+                if p.name.lower() in compose_names or p.name.lower().endswith((".yml", ".yaml")):
+                    res_p = p.resolve()
+                    if str(res_p) not in seen_paths:
+                        seen_paths.add(str(res_p))
+                        discovered_files.append(res_p)
+                continue
+
+            if p.is_dir():
+                for fname in compose_names:
+                    candidate = p / fname
+                    if candidate.is_file():
+                        res_p = candidate.resolve()
+                        if str(res_p) not in seen_paths:
+                            seen_paths.add(str(res_p))
+                            discovered_files.append(res_p)
+
+                try:
+                    for sub in p.iterdir():
+                        if sub.is_dir() and not sub.name.startswith("."):
+                            for fname in compose_names:
+                                candidate = sub / fname
+                                if candidate.is_file():
+                                    res_p = candidate.resolve()
+                                    if str(res_p) not in seen_paths:
+                                        seen_paths.add(str(res_p))
+                                        discovered_files.append(res_p)
+                except Exception as e:
+                    logger.debug("Error scanning directory %s: %s", p, e)
+
+        results = []
+        for cf in discovered_files:
+            results.append(self._inspect_compose_file(cf))
+
+        return results
+
+    discover_local_compose_stacks = discover_local_compose_projects
+
+    def _inspect_compose_file(self, compose_path: Path) -> dict[str, Any]:
+        """Parses compose metadata for TUI display."""
+        doc = {}
+        try:
+            import yaml
+            raw = compose_path.read_text(encoding="utf-8")
+            doc = yaml.safe_load(raw) or {}
+        except Exception:
+            pass
+
+        services = doc.get("services") or {} if isinstance(doc, dict) else {}
+        service_names = list(services.keys())
+        images = []
+        for s in services.values():
+            if isinstance(s, dict) and s.get("image"):
+                images.append(str(s["image"]))
+
+        vols = list((doc.get("volumes") or {}).keys()) if isinstance(doc, dict) else []
+
+        parent_name = compose_path.parent.name
+        proj_name = ""
+        if isinstance(doc, dict) and doc.get("name"):
+            proj_name = str(doc.get("name"))
+        elif parent_name and parent_name not in (".", ""):
+            proj_name = parent_name
+        else:
+            proj_name = compose_path.stem
+
+        image_str = ", ".join(images) if images else "compose stack"
+
+        return {
+            "name": proj_name,
+            "image": image_str,
+            "status": "compose",
+            "volumes": vols,
+            "compose_file": str(compose_path),
+            "services": service_names,
+            "type": "compose",
+        }
+
+    def get_stopped_containers(self) -> list[dict[str, Any]]:
+        """Lists containers with status != 'running'."""
+        if not self.is_available():
+            return []
+        all_c = self.list_containers(all_containers=True)
+        return [c for c in all_c if not c.get("running")]
+
+    def get_running_containers(self) -> list[dict[str, Any]]:
+        """Lists containers with status == 'running'."""
+        if not self.is_available():
+            return []
+        all_c = self.list_containers(all_containers=True)
+        return [c for c in all_c if c.get("running")]
 
     def save_image(self, image_name: str, output_tar: Path) -> bool:
         """Saves a Docker image to a tar archive using 'docker save'."""

@@ -61,7 +61,7 @@ def cmd_backup(args: argparse.Namespace, config: AppConfig, config_path: Path | 
 
         # Interactive manual checklist (docker ps)
         if getattr(args, "interactive", False):
-            print("\n🔍 Discovering active Docker containers (docker ps)...")
+            print("\nDiscovering active Docker containers (docker ps)...")
             raw_targets = engine.get_docker_ps_targets()
 
             # If no running containers returned by ps, fall back to general target discovery
@@ -80,7 +80,7 @@ def cmd_backup(args: argparse.Namespace, config: AppConfig, config_path: Path | 
                 ]
 
             if not raw_targets:
-                print("❌ No active Docker containers or volumes found.")
+                print("[!] No active Docker containers or volumes found.")
                 return 0
 
             selected_indices = interactive_checklist(
@@ -93,13 +93,13 @@ def cmd_backup(args: argparse.Namespace, config: AppConfig, config_path: Path | 
                 return 0
 
             targets = [raw_targets[i]["target_config"] for i in selected_indices]
-            print(f"\n✅ Selected {len(targets)} container(s) for backup:")
+            print(f"\n[OK] Selected {len(targets)} container(s) for backup:")
             for t in targets:
                 v_str = f"Volumes: [{', '.join(t.volumes)}]" if t.volumes else "(No volumes)"
-                print(f"  • {t.name:<20} {v_str}")
+                print(f"  * {t.name:<20} {v_str}")
 
             # Option to save selection to config.yaml
-            save_opt = input("\n💾 Save this selection to config.yaml for automated/scheduled backups? (y/N): ").strip().lower()
+            save_opt = input("\nSave this selection to config.yaml for automated/scheduled backups? (y/N): ").strip().lower()
             if save_opt in ("y", "yes"):
                 target_cfg_path = config_path or Path("./config.yaml")
                 persist_targets_to_config(target_cfg_path, targets)
@@ -161,7 +161,7 @@ def cmd_restore(args: argparse.Namespace, config: AppConfig, logger) -> int:
     if getattr(args, "interactive", False) or not snapshot_args:
         snapshots = engine.list_snapshots()
         if not snapshots:
-            print(f"\n❌ No backup snapshots found in: {config.storage.destination_dir}")
+            print(f"\n[!] No backup snapshots found in: {config.storage.destination_dir}")
             return 1
 
         items = []
@@ -185,11 +185,11 @@ def cmd_restore(args: argparse.Namespace, config: AppConfig, logger) -> int:
 
         selected_snapshots = [snapshots[i] for i in selected_indices]
 
-        print(f"\n📦 Selected {len(selected_snapshots)} snapshot(s) to restore:")
+        print(f"\nSelected {len(selected_snapshots)} snapshot(s) to restore:")
         for s in selected_snapshots:
             v_info = ", ".join(s["volumes"]) if s["volumes"] else "(No volumes)"
             comp_info = f"| Compose: {s['compose_file']}" if s.get("compose_file") else ""
-            print(f"  • {s['filename']:<44} Target: {s['target_name']:<16} Volumes: [{v_info}] {comp_info}")
+            print(f"  * {s['filename']:<44} Target: {s['target_name']:<16} Volumes: [{v_info}] {comp_info}")
 
         # Volume restore strategy
         dest_choice = prompt_select(
@@ -209,8 +209,6 @@ def cmd_restore(args: argparse.Namespace, config: AppConfig, logger) -> int:
             if comp_confirm in ("y", "yes"):
                 c_dir = input("Base destination directory for compose files [default: ./restored_compose]: ").strip()
                 base_compose_dir = Path(c_dir if c_dir else "./restored_compose")
-                start_confirm = input("Run 'docker compose up -d' immediately for restored stacks? (y/N): ").strip().lower()
-                auto_start = start_confirm in ("y", "yes")
 
         confirm = input(f"\nProceed with restoring {len(selected_snapshots)} snapshot(s)? (y/N): ").strip().lower()
         if confirm not in ("y", "yes"):
@@ -218,6 +216,7 @@ def cmd_restore(args: argparse.Namespace, config: AppConfig, logger) -> int:
             return 0
 
         success_count = 0
+        all_restored_compose: list[Path] = []
         for s in selected_snapshots:
             snap_path = Path(s["path"])
             vols = s["volumes"]
@@ -228,23 +227,48 @@ def cmd_restore(args: argparse.Namespace, config: AppConfig, logger) -> int:
 
             comp_dest = None
             if base_compose_dir:
-                comp_dest = (base_compose_dir / s["target_name"]) if len(selected_snapshots) > 1 else base_compose_dir
+                comp_dest = (base_compose_dir / s["target_name"]) if (len(selected_snapshots) > 1 or base_compose_dir.name == "restored_compose") else base_compose_dir
 
             try:
                 res = engine.execute_restore(
                     snapshot_path=snap_path,
                     volume_mapping=vol_mapping,
-                    auto_start=auto_start,
+                    auto_start=False,
                     compose_output_dir=comp_dest,
                 )
                 success_count += 1
                 logger.info("Successfully restored snapshot '%s' (Volumes: %s)", s["filename"], res.get("restored_volumes"))
+                for cf in res.get("restored_compose", []):
+                    p_cf = Path(cf)
+                    if p_cf.name.endswith((".yml", ".yaml")):
+                        all_restored_compose.append(p_cf)
             except Exception as e:
                 logger.error("Failed restoring snapshot '%s': %s", s["filename"], e)
 
         print("\n" + "=" * 90)
-        print(f"🎉 Restore Summary: {success_count}/{len(selected_snapshots)} snapshot(s) restored successfully.")
+        print(f"Restore Summary: {success_count}/{len(selected_snapshots)} snapshot(s) restored successfully.")
         print("=" * 90)
+
+        # Post-restore Runner TUI for compose stacks
+        if all_restored_compose:
+            runner_items = [docker_client._inspect_compose_file(cf) for cf in all_restored_compose]
+            selected_runner_indices = interactive_checklist(
+                runner_items,
+                title="Select Restored Docker Stacks to Run (docker compose up -d):",
+            )
+            if selected_runner_indices:
+                print(f"\nStarting {len(selected_runner_indices)} selected Docker stack(s)...")
+                for idx in selected_runner_indices:
+                    item = runner_items[idx]
+                    comp_file = item["compose_file"]
+                    print(f"  * Starting {item['name']} ({comp_file})...")
+                    if docker_client.run_compose_up(comp_file):
+                        print(f"    [OK] {item['name']} started successfully.")
+                    else:
+                        print(f"    [ERR] Failed to start {item['name']}. Check logs for details.")
+            else:
+                print("Skipped starting restored Docker stacks.")
+
         return 0 if success_count == len(selected_snapshots) else 1
 
     # Direct Flags Mode (single or multiple snapshot paths)
@@ -313,7 +337,7 @@ def cmd_verify(args: argparse.Namespace, config: AppConfig, logger) -> int:
     path = Path(args.snapshot_path).resolve()
     try:
         res = engine.verify_snapshot(path)
-        print(f"\n✅ Snapshot Verified: {path.name}")
+        print(f"\n[OK] Snapshot Verified: {path.name}")
         print(f"  Size:     {res['size_formatted']}")
         print(f"  SHA-256:  {res['sha256']}")
         manifest = res.get("manifest", {})
@@ -358,7 +382,7 @@ def cmd_schedule(args: argparse.Namespace, config: AppConfig, config_path: Path,
 
     else:
         status = sched.get_status()
-        print("\n📅 Schedule Status:")
+        print("\nSchedule Status:")
         print(f"  Systemd Timer Active: {status['systemd_timer_active']}")
         print(f"  Systemd Unit File:    {status['systemd_timer_file']}")
         print(f"  Cron Job File:        {status['cron_file']}")
@@ -373,10 +397,10 @@ def cmd_targets(args: argparse.Namespace, config: AppConfig, config_path: Path |
     if action == "select":
         docker_client = DockerClient()
         engine = BackupEngine(config, docker_client=docker_client)
-        print("\n🔍 Discovering active Docker containers (docker ps)...")
+        print("\nDiscovering active Docker containers (docker ps)...")
         raw_targets = engine.get_docker_ps_targets()
         if not raw_targets:
-            print("❌ No active Docker containers found.")
+            print("[!] No active Docker containers found.")
             return 1
 
         selected_indices = interactive_checklist(
@@ -389,10 +413,10 @@ def cmd_targets(args: argparse.Namespace, config: AppConfig, config_path: Path |
 
         selected_targets = [raw_targets[i]["target_config"] for i in selected_indices]
         persist_targets_to_config(target_cfg_path, selected_targets)
-        print(f"\n✅ Successfully saved {len(selected_targets)} target(s) to {target_cfg_path.resolve()}!")
+        print(f"\n[OK] Successfully saved {len(selected_targets)} target(s) to {target_cfg_path.resolve()}!")
         for t in selected_targets:
             v_str = f"Volumes: [{', '.join(t.volumes)}]" if t.volumes else "(No volumes)"
-            print(f"  • {t.name:<20} {v_str}")
+            print(f"  * {t.name:<20} {v_str}")
         return 0
 
     else:
@@ -406,6 +430,188 @@ def cmd_targets(args: argparse.Namespace, config: AppConfig, config_path: Path |
             comp = f"Compose: {t.compose_file}" if t.compose_file else ""
             print(f"  [{idx}] {t.name:<20} {v_str} {comp}")
         return 0
+
+
+def cmd_up(args: argparse.Namespace, config: AppConfig, logger) -> int:
+    """Handles the 'up' / 'start' command (interactive TUI checklist for launching stacks/containers)."""
+    docker_client = DockerClient()
+
+    # Search paths for compose files
+    # ponytail: default scan covers ./restored_compose and project root; users can supply --compose-dir
+    search_dirs = [Path("./restored_compose"), Path(".")]
+    if getattr(args, "compose_dir", None):
+        search_dirs.insert(0, Path(args.compose_dir))
+    for t in config.targets:
+        if t.compose_file:
+            search_dirs.append(Path(t.compose_file))
+
+    compose_items = docker_client.discover_local_compose_projects(search_dirs)
+
+    # Discover stopped containers and disambiguate compose vs standalone
+    stopped_containers = docker_client.get_stopped_containers()
+    known_compose_projects = {item["name"].lower() for item in compose_items}
+    known_compose_files = {str(Path(item["compose_file"]).resolve()) for item in compose_items if item.get("compose_file")}
+
+    container_items = []
+    for c in stopped_containers:
+        labels = c.get("labels") or {}
+        comp_proj = labels.get("com.docker.compose.project")
+        comp_cfg = labels.get("com.docker.compose.project.config_files")
+
+        # If it's part of a known compose project, it's already represented in compose_items
+        if comp_proj and comp_proj.lower() in known_compose_projects:
+            continue
+
+        # If it has a compose file on disk that wasn't scanned yet, add as compose project
+        if comp_cfg:
+            first_cfg = Path(comp_cfg.split(",")[0].strip())
+            if first_cfg.is_file() and str(first_cfg.resolve()) not in known_compose_files:
+                inspected = docker_client._inspect_compose_file(first_cfg)
+                compose_items.append(inspected)
+                known_compose_projects.add(inspected["name"].lower())
+                known_compose_files.add(str(first_cfg.resolve()))
+                continue
+
+        # Otherwise, treat as standalone container
+        vols = [m["name"] for m in c.get("mounts", []) if m.get("type") == "volume" and m.get("name")]
+        container_items.append({
+            "name": c.get("name", "unknown"),
+            "image": c.get("image") or "",
+            "status": c.get("status") or "exited",
+            "volumes": vols,
+            "type": "container",
+            "container_id": c.get("id"),
+        })
+
+    all_items = compose_items + container_items
+
+    if not all_items:
+        print("\n[!] No stopped containers or compose projects found.")
+        return 0
+
+    print(f"\nFound {len(all_items)} candidate service(s) ({len(compose_items)} stack(s), {len(container_items)} standalone container(s)).")
+    selected_indices = interactive_checklist(
+        all_items,
+        title="Select Docker Stacks / Containers to Start (docker compose up / docker start):",
+    )
+
+    if not selected_indices:
+        print("No services selected. Exiting.")
+        return 0
+
+    print(f"\nStarting {len(selected_indices)} selected service(s)...")
+    success_count = 0
+    for idx in selected_indices:
+        item = all_items[idx]
+        if item.get("type") == "compose":
+            comp_file = item["compose_file"]
+            print(f"  * Starting compose stack '{item['name']}' ({comp_file})...")
+            if docker_client.run_compose_up(comp_file):
+                print(f"    [OK] {item['name']} started successfully.")
+                success_count += 1
+            else:
+                print(f"    [ERR] Failed to start {item['name']}. Check logs for details.")
+        else:
+            name = item["name"]
+            print(f"  * Starting container '{name}'...")
+            if docker_client.start_container(name):
+                print(f"    [OK] {name} started successfully.")
+                success_count += 1
+            else:
+                print(f"    [ERR] Failed to start {name}. Check logs for details.")
+
+    print("\n" + "=" * 90)
+    print(f"Startup Summary: {success_count}/{len(selected_indices)} service(s) started successfully.")
+    print("=" * 90)
+    return 0 if success_count == len(selected_indices) else 1
+
+
+def cmd_down(args: argparse.Namespace, config: AppConfig, logger) -> int:
+    """Handles the 'down' / 'stop' command (interactive TUI checklist for stopping stacks/containers)."""
+    docker_client = DockerClient()
+
+    running_containers = docker_client.get_running_containers()
+    if not running_containers:
+        print("\n[!] No running Docker containers found.")
+        return 0
+
+    compose_projects: dict[str, dict[str, Any]] = {}
+    container_items = []
+
+    for c in running_containers:
+        labels = c.get("labels") or {}
+        comp_proj = labels.get("com.docker.compose.project")
+        comp_cfg = labels.get("com.docker.compose.project.config_files")
+        vols = [m["name"] for m in c.get("mounts", []) if m.get("type") == "volume" and m.get("name")]
+
+        if comp_proj and comp_cfg:
+            first_cfg = Path(comp_cfg.split(",")[0].strip())
+            if first_cfg.is_file():
+                if comp_proj not in compose_projects:
+                    compose_projects[comp_proj] = {
+                        "name": comp_proj,
+                        "image": c.get("image") or "compose stack",
+                        "status": "running",
+                        "volumes": list(vols),
+                        "compose_file": str(first_cfg.resolve()),
+                        "type": "compose",
+                    }
+                else:
+                    for v in vols:
+                        if v not in compose_projects[comp_proj]["volumes"]:
+                            compose_projects[comp_proj]["volumes"].append(v)
+                continue
+
+        container_items.append({
+            "name": c.get("name", "unknown"),
+            "image": c.get("image") or "",
+            "status": c.get("status") or "running",
+            "volumes": vols,
+            "type": "container",
+            "container_id": c.get("id"),
+        })
+
+    all_items = list(compose_projects.values()) + container_items
+
+    if not all_items:
+        print("\n[!] No running containers or compose stacks found.")
+        return 0
+
+    print(f"\nFound {len(all_items)} active service(s) ({len(compose_projects)} stack(s), {len(container_items)} container(s)).")
+    selected_indices = interactive_checklist(
+        all_items,
+        title="Select Docker Stacks / Containers to Stop (docker compose down / docker stop):",
+    )
+
+    if not selected_indices:
+        print("No services selected. Exiting.")
+        return 0
+
+    print(f"\nStopping {len(selected_indices)} selected service(s)...")
+    success_count = 0
+    for idx in selected_indices:
+        item = all_items[idx]
+        if item.get("type") == "compose":
+            comp_file = item["compose_file"]
+            print(f"  * Stopping compose stack '{item['name']}' ({comp_file})...")
+            if docker_client.run_compose_down(comp_file):
+                print(f"    [OK] {item['name']} stopped successfully.")
+                success_count += 1
+            else:
+                print(f"    [ERR] Failed to stop {item['name']}. Check logs for details.")
+        else:
+            name = item["name"]
+            print(f"  * Stopping container '{name}'...")
+            if docker_client.stop_container(name):
+                print(f"    [OK] {name} stopped successfully.")
+                success_count += 1
+            else:
+                print(f"    [ERR] Failed to stop {name}. Check logs for details.")
+
+    print("\n" + "=" * 90)
+    print(f"Shutdown Summary: {success_count}/{len(selected_indices)} service(s) stopped successfully.")
+    print("=" * 90)
+    return 0 if success_count == len(selected_indices) else 1
 
 
 def main():
@@ -468,6 +674,14 @@ def main():
     targets_sub.add_parser("list", help="List targets saved in config.yaml")
     targets_sub.add_parser("select", help="Open interactive docker ps checklist to configure targets in config.yaml")
 
+    # up / start
+    p_up = subparsers.add_parser("up", aliases=["start"], help="Start stopped Docker containers or compose stacks via TUI")
+    p_up.add_argument("--compose-dir", help="Additional directory to scan for docker-compose files")
+
+    # down / stop
+    p_down = subparsers.add_parser("down", aliases=["stop"], help="Stop running Docker containers or compose stacks via TUI")
+    p_down.add_argument("--compose-dir", help="Additional directory to scan for docker-compose files")
+
     args = parser.parse_args()
 
     if not args.subcommand:
@@ -485,6 +699,10 @@ def main():
         sys.exit(cmd_backup(args, config, config_path, logger))
     elif args.subcommand == "restore":
         sys.exit(cmd_restore(args, config, logger))
+    elif args.subcommand in ("up", "start"):
+        sys.exit(cmd_up(args, config, logger))
+    elif args.subcommand in ("down", "stop"):
+        sys.exit(cmd_down(args, config, logger))
     elif args.subcommand == "list":
         sys.exit(cmd_list(args, config, logger))
     elif args.subcommand == "verify":

@@ -23,8 +23,11 @@
   - [Option A: Systemd Timer (Recommended for Modern Linux)](#option-a-systemd-timer-recommended-for-modern-linux)
   - [Option B: Host Cron](#option-b-host-cron)
 - [Restore Workflows](#restore-workflows)
-  - [Interactive Wizard Mode](#interactive-wizard-mode)
+  - [Interactive Wizard & Post-Restore Runner](#interactive-wizard--post-restore-runner)
   - [Direct CLI Flags Mode (Scripting / CI)](#direct-cli-flags-mode-scripting--ci)
+- [Service Runner & Lifecycle Management (`up` / `down`)](#service-runner--lifecycle-management-up--down)
+  - [Starting Stacks & Containers (`up` / `start`)](#starting-stacks--containers-up--start)
+  - [Stopping Services (`down` / `stop`)](#stopping-services-down--stop)
 - [Docker Labels Reference](#docker-labels-reference)
 - [CLI Command Cheat Sheet](#cli-command-cheat-sheet)
 - [Safety & Reliability Guarantees](#safety--reliability-guarantees)
@@ -335,14 +338,25 @@ sudo docker-backuper schedule remove
 
 ## Restore Workflows
 
-### Interactive Wizard Mode
+### Interactive Wizard & Post-Restore Runner
 ```bash
 docker-backuper restore -i
 ```
-1. Lists all available `.tar.gz` snapshots with target name, timestamp, and size.
-2. Prompts you to pick a snapshot.
-3. Allows selecting between **in-place overwrite** or **safe staging volume** (e.g., `app_data_restored`).
-4. Asks if you want to extract `docker-compose.yml` and auto-start the container stack.
+1. Lists all available `.tar.gz` snapshots with target name, timestamp, and size in an interactive multi-select checklist.
+2. Prompts to choose between **in-place overwrite** or **safe staging volume** (e.g., `app_data_restored`).
+3. Extracts volume data, imports embedded images into the Docker daemon (`docker load`), and writes standalone `docker-compose.yml` specifications.
+4. **Interactive Post-Restore Runner TUI:** Displays an interactive checklist allowing you to selectively launch specific stacks (or all at once):
+
+```text
+==========================================================================================
+🐳 Select Restored Docker Stacks to Run (docker compose up -d):
+Use [↑/↓] Navigate | [Space] Toggle | [a] Select All | [Enter] Confirm | [q] Cancel
+==========================================================================================
+> [X]  1. nexus-mysql        mysql:8.4        compose        Volumes: [nexus_db]
+  [X]  2. nexus-prompt-web   nexus-web:latest compose        Volumes: [web_static]
+==========================================================================================
+Selected: 2 of 2 container(s) | Press [Enter] to proceed
+```
 
 ### Direct CLI Flags Mode (Scripting / CI)
 For automated recovery scripts or CI pipelines without prompts:
@@ -360,6 +374,35 @@ docker-backuper restore \
   --compose-dir /srv/apps/restored-db \
   --auto-start
 ```
+
+---
+
+## Service Runner & Lifecycle Management (`up` / `down`)
+
+Operators can inspect and launch stopped containers or compose projects on the host at any time without re-running restore.
+
+### Starting Stacks & Containers (`up` / `start`)
+```bash
+docker-backuper up
+# or: docker-backuper start
+```
+- Discovers:
+  - Extracted compose stacks in `./restored_compose/*/docker-compose.yml`
+  - Compose files located in the project root (`./docker-compose.yml`)
+  - Explicit compose targets defined in `config.yaml`
+  - Stopped/exited standalone containers on the host (`docker ps -a`)
+- Displays an interactive checklist to toggle items `[X]` / `[ ]`.
+- Starts selected compose stacks via `docker compose up -d` and standalone containers via `docker start <name>`.
+- Supports `--compose-dir <path>` to scan custom compose directories.
+
+### Stopping Services (`down` / `stop`)
+```bash
+docker-backuper down
+# or: docker-backuper stop
+```
+- Scans all currently running containers and active Docker Compose stacks on the host.
+- Displays an interactive checklist to choose which services to bring down.
+- Safely runs `docker compose down` for compose projects and `docker stop` for standalone containers.
 
 ---
 
@@ -401,6 +444,15 @@ docker-backuper restore -i
 
 # Direct restore to target volume
 docker-backuper restore -s /path/to/snapshot.tar.gz -v my_vol
+
+# ----------------- RUNNER TUI (UP / DOWN) -------
+# Launch stopped containers & compose stacks via interactive checklist
+docker-backuper up
+# (or alias: docker-backuper start)
+
+# Stop running containers & compose stacks via interactive checklist
+docker-backuper down
+# (or alias: docker-backuper stop)
 
 # ----------------- TARGETS MANAGEMENT -----------
 # Open interactive docker ps checklist to configure targets
